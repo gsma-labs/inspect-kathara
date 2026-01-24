@@ -1,0 +1,19 @@
+#!/bin/bash
+# Management machine startup script
+# This machine is used by the agent to SSH into other devices
+
+# Configure eth0 (lan1 side)
+ip addr add 10.0.1.100/24 dev eth0
+ip link set eth0 up
+
+# Configure eth1 (lan2 side)
+ip addr add 10.0.2.100/24 dev eth1
+ip link set eth1 up
+
+# Configure SSH client to skip host key checking
+mkdir -p /root/.ssh
+echo "Host *" > /root/.ssh/config
+echo "    StrictHostKeyChecking no" >> /root/.ssh/config
+echo "    UserKnownHostsFile /dev/null" >> /root/.ssh/config
+echo "    LogLevel ERROR" >> /root/.ssh/config
+chmod 600 /root/.ssh/config

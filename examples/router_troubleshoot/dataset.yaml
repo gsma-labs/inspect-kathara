@@ -1,0 +1,245 @@
+# Router Troubleshooting Dataset
+# Each sample injects a different fault into the local_network scenario
+
+prompt_template: |
+  You are on a management machine connected to a network with the following topology:
+
+    pc1 (10.0.1.10) <---> router (10.0.1.1 | 10.0.2.1) <---> pc2 (10.0.2.10)
+
+  Users are reporting that pc1 cannot reach pc2.
+
+  From this management machine, you can SSH into any of the devices: PC1, PC2, or the Router.
+  All SSH connections use root with no password.
+
+  Your task is to diagnose and fix the issue. The task is complete when PC1 can successfully ping PC2.
+
+samples:
+  - id: forward_drop
+    family_id: router_troubleshoot
+    target: "iptables -P FORWARD ACCEPT"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: easy
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        iptables -P FORWARD DROP
+
+  - id: conntrack
+    family_id: router_troubleshoot
+    target: "echo 65536 > /proc/sys/net/netfilter/nf_conntrack_max"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        modprobe nf_conntrack 2>/dev/null || true
+        iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        iptables -A FORWARD -m conntrack --ctstate NEW -j ACCEPT
+        echo 1 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || true
+
+  - id: stateful_trap
+    family_id: router_troubleshoot
+    target: "iptables -D FORWARD -m state --state ESTABLISHED,RELATED -j DROP"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        iptables -A FORWARD -m state --state NEW -j ACCEPT
+        iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j DROP
+        iptables -P FORWARD DROP
+
+  - id: rp_filter
+    family_id: router_troubleshoot
+    target: "echo 0 > /proc/sys/net/ipv4/conf/eth0/rp_filter; ip route del 10.0.2.0/24"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: very_hard
+      location: router+pc1
+      type: multi-step
+    setup:
+      router: |
+        echo 1 > /proc/sys/net/ipv4/conf/eth0/rp_filter 2>/dev/null || true
+        echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null || true
+      pc1: |
+        ip addr add 10.0.2.50/24 dev eth0
+        ip route add default via 10.0.1.1
+
+  - id: mangle_mark
+    family_id: router_troubleshoot
+    target: "iptables -t mangle -D FORWARD -j MARK --set-mark 0x1"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: very_hard
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        iptables -t mangle -A FORWARD -j MARK --set-mark 0x1
+        iptables -A FORWARD -m mark --mark 0x1 -j DROP
+
+  - id: icmp_type
+    family_id: router_troubleshoot
+    target: "iptables -D FORWARD -p icmp --icmp-type 0 -j DROP"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        iptables -A FORWARD -p icmp --icmp-type 8 -j ACCEPT
+        iptables -A FORWARD -p icmp --icmp-type 0 -j DROP
+        iptables -A FORWARD -j ACCEPT
+
+  - id: rate_limit
+    family_id: router_troubleshoot
+    target: "iptables -D FORWARD -m hashlimit --hashlimit-above 1/min --hashlimit-mode srcip --hashlimit-name ratelimit -j DROP"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        iptables -A FORWARD -m hashlimit --hashlimit-above 1/min --hashlimit-mode srcip --hashlimit-name ratelimit -j DROP
+        iptables -A FORWARD -j ACCEPT
+
+  - id: ttl_chain
+    family_id: router_troubleshoot
+    target: "iptables -t mangle -D OUTPUT -j TTL --ttl-set 1; iptables -D OUTPUT -p icmp --icmp-type 11 -j DROP"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: very_hard
+      location: pc1+router
+      type: multi-step
+    setup:
+      pc1: |
+        iptables -t mangle -A OUTPUT -j TTL --ttl-set 1
+      router: |
+        iptables -A OUTPUT -p icmp --icmp-type 11 -j DROP
+
+  - id: nat_forward
+    family_id: router_troubleshoot
+    target: "iptables -A FORWARD -i eth1 -o eth0 -m state --state ESTABLISHED,RELATED -j ACCEPT"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: router
+      type: multi-step
+    setup:
+      router: |
+        iptables -A FORWARD -i eth0 -o eth1 -j ACCEPT
+        iptables -P FORWARD DROP
+
+  - id: mac_arp
+    family_id: router_troubleshoot
+    target: "arp -d 10.0.1.1; iptables -D FORWARD -m mac --mac-source ! 00:00:5e:00:53:01 -j DROP"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: very_hard
+      location: pc1+router
+      type: multi-step
+    setup:
+      pc1: |
+        arp -s 10.0.1.1 00:00:5e:00:53:99
+      router: |
+        iptables -A FORWARD -m mac --mac-source ! 00:00:5e:00:53:01 -j DROP
+        iptables -A FORWARD -j ACCEPT
+
+  - id: dual_firewall
+    family_id: router_troubleshoot
+    target: "iptables -D OUTPUT -p icmp -j DROP; iptables -D INPUT -p icmp -j DROP"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: pc1+pc2
+      type: multi-step
+    setup:
+      pc1: |
+        iptables -A OUTPUT -p icmp -j DROP
+      pc2: |
+        iptables -A INPUT -p icmp -j DROP
+
+  - id: sysctl_conf
+    family_id: router_troubleshoot
+    target: "sysctl -p"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: medium
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        mkdir -p /etc/sysctl.d
+        cat > /etc/sysctl.d/99-network.conf << 'EOF'
+        net.core.rmem_max = 16777216
+        net.core.wmem_max = 16777216
+        net.ipv4.ip_forward = 0
+        EOF
+        sysctl -p /etc/sysctl.d/99-network.conf 2>/dev/null || true
+
+  - id: interfaces_gateway
+    family_id: router_troubleshoot
+    target: "ip route add default via 10.0.1.1"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: medium
+      location: pc1
+      type: single-fix
+    setup:
+      pc1: |
+        ip route del default 2>/dev/null || true
+        cat > /etc/network/interfaces << 'EOF'
+        auto lo
+        iface lo inet loopback
+        auto eth0
+        iface eth0 inet static
+            address 10.0.1.10
+            netmask 255.255.255.0
+            gateway 10.0.1.254
+        EOF
+
+  - id: firewall_script
+    family_id: router_troubleshoot
+    target: "/root/firewall.sh"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: router
+      type: single-fix
+    setup:
+      router: |
+        cat > /root/firewall.sh << 'FWSCRIPT'
+        #!/bin/bash
+        # Firewall Configuration Script v2.1
+        iptables -P FORWARD ACCEPT
+        iptables -F FORWARD
+        FWSCRIPT
+        chmod +x /root/firewall.sh
+        iptables -P FORWARD DROP
+
+  - id: cron_dropper
+    family_id: router_troubleshoot
+    target: "rm /etc/cron.d/network-monitor"
+    sandbox: ["docker", "local_network"]
+    metadata:
+      difficulty: hard
+      location: router
+      type: multi-step
+    setup:
+      router: |
+        cat > /root/network_monitor.sh << 'SCRIPT'
+        #!/bin/bash
+        iptables -P FORWARD DROP 2>/dev/null
+        SCRIPT
+        chmod +x /root/network_monitor.sh
+        mkdir -p /etc/cron.d
+        echo "* * * * * root /root/network_monitor.sh" > /etc/cron.d/network-monitor
+        /root/network_monitor.sh

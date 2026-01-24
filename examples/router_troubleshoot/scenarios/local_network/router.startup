@@ -1,0 +1,22 @@
+#!/bin/bash
+# Router startup script
+
+# Configure eth0 (lan1 side - connects to pc1)
+ip addr add 10.0.1.1/24 dev eth0
+ip link set eth0 up
+
+# Configure eth1 (lan2 side - connects to pc2)
+ip addr add 10.0.2.1/24 dev eth1
+ip link set eth1 up
+
+# Configure SSH for passwordless root login
+mkdir -p /etc/ssh
+echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+echo "PermitEmptyPasswords yes" >> /etc/ssh/sshd_config
+passwd -d root 2>/dev/null || true
+
+# Start SSH server
+/etc/init.d/ssh start 2>/dev/null || service ssh start 2>/dev/null || true
+
+# Enable IP forwarding
+echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
