@@ -22,12 +22,20 @@ classifiers = [
 ]
 
 dependencies = [
+    "anthropic>=0.76.0",
     "inspect-ai>=0.3.0",
+    "numpy>=2.2.6",
+    "openai>=2.15.0",
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
+# Memory-based concurrency auto-scaling (recommended for production)
+memory = [
+    "psutil>=5.9.0",
+]
 dev = [
+    "psutil>=5.9.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
