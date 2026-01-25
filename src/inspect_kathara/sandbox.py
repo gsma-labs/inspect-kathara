@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
+from inspect_ai.util._sandbox.docker.docker import DockerSandboxEnvironment
+from inspect_ai.util._sandbox.environment import (
+    SandboxEnvironment,
+    SandboxEnvironmentConfigType,
+)
+from inspect_ai.util._sandbox.registry import sandboxenv
+from typing_extensions import override
 
 from inspect_kathara._util import (
     DEFAULT_IMAGE,
@@ -17,6 +25,163 @@ from inspect_kathara._util import (
 )
 
 logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Concurrency Control
+# -----------------------------------------------------------------------------
+
+# Module-level semaphore to serialize container startup across concurrent samples.
+# This prevents Docker daemon overwhelm when multiple Kathara stacks start simultaneously.
+# The semaphore is initialized lazily to ensure it's created in the correct event loop.
+_startup_semaphore: asyncio.Semaphore | None = None
+_startup_semaphore_lock = asyncio.Lock()
+
+# Stabilization delay (seconds) after containers start before releasing semaphore.
+# This allows services (FRR, BIND, etc.) to initialize before the next stack starts.
+STARTUP_STABILIZATION_DELAY = 5.0
+
+# Memory thresholds for auto-scaling concurrency
+MIN_TOTAL_RAM_GB = 16  # Minimum total RAM to allow parallel execution
+MIN_AVAILABLE_RAM_GB = 8  # Minimum available RAM to allow parallel execution
+
+
+async def _get_startup_semaphore() -> asyncio.Semaphore:
+    """Get or create the startup semaphore (lazy initialization).
+
+    The semaphore must be created within an async context to bind to the
+    correct event loop. This function ensures thread-safe lazy creation.
+    """
+    global _startup_semaphore
+    async with _startup_semaphore_lock:
+        if _startup_semaphore is None:
+            _startup_semaphore = asyncio.Semaphore(1)
+        return _startup_semaphore
+
+
+def _calculate_safe_concurrency() -> int:
+    """Calculate safe concurrency based on system memory.
+
+    Kathara stacks are memory-intensive:
+    - 26-38 containers per stack
+    - ~1.7GB memory per container
+    - ~4GB total per stack (after container overhead sharing)
+
+    Returns:
+        1 for serial execution (safest default)
+        2 if system has abundant resources (≥16GB total, ≥8GB available)
+    """
+    try:
+        import psutil
+
+        mem = psutil.virtual_memory()
+        total_gb = mem.total / (1024**3)
+        available_gb = mem.available / (1024**3)
+
+        if total_gb >= MIN_TOTAL_RAM_GB and available_gb >= MIN_AVAILABLE_RAM_GB:
+            logger.debug(
+                f"Kathara concurrency: 2 (total={total_gb:.1f}GB, available={available_gb:.1f}GB)"
+            )
+            return 2
+
+        logger.debug(
+            f"Kathara concurrency: 1 (total={total_gb:.1f}GB, available={available_gb:.1f}GB)"
+        )
+        return 1
+
+    except ImportError:
+        logger.debug("Kathara concurrency: 1 (psutil not installed)")
+        return 1
+    except Exception as e:
+        logger.warning(f"Failed to check system memory, using serial execution: {e}")
+        return 1
+
+
+# -----------------------------------------------------------------------------
+# Kathara Sandbox Environment
+# -----------------------------------------------------------------------------
+
+
+@sandboxenv(name="kathara")
+class KatharaSandboxEnvironment(DockerSandboxEnvironment):
+    """Docker sandbox with conservative concurrency for Kathara network topologies.
+
+    Kathara labs spin up large container stacks (26-38 containers per sample,
+    ~1.7GB memory each). This environment provides:
+
+    1. **Memory-based concurrency**: Defaults to 1 (serial) unless system has
+       ≥16GB total RAM and ≥8GB available, then allows 2 parallel stacks.
+
+    2. **Startup serialization**: Even when Inspect allows parallel samples,
+       container startup is serialized via semaphore to prevent Docker daemon
+       overwhelm from simultaneous `compose up` calls.
+
+    3. **Stabilization delay**: After containers start, a brief delay allows
+       services (FRR, BIND, etc.) to initialize before releasing the semaphore.
+
+    Usage in dataset.yaml:
+        sandbox: [kathara, "data_center/dc_clos_bg/compose.yaml"]
+
+    Override concurrency via CLI:
+        inspect eval --max-sandboxes 2  # Force parallel if you have resources
+
+    The "kathara" sandbox type is functionally identical to "docker" except
+    for the conservative concurrency defaults and serialized startup.
+    All DockerSandboxEnvironment features (exec, read_file, write_file, etc.)
+    work unchanged.
+    """
+
+    @classmethod
+    def default_concurrency(cls) -> int | None:
+        """Calculate safe concurrency based on system memory.
+
+        Kathara stacks are memory-intensive (~4GB per stack). This method:
+        - Returns 1 (serial) by default for safety
+        - Returns 2 if system has ≥16GB total RAM and ≥8GB available
+        - Can be overridden via --max-sandboxes CLI flag
+
+        Returns:
+            1 or 2 based on available system resources
+        """
+        return _calculate_safe_concurrency()
+
+    @override
+    @classmethod
+    async def sample_init(
+        cls,
+        task_name: str,
+        config: SandboxEnvironmentConfigType | None,
+        metadata: dict[str, str],
+    ) -> dict[str, SandboxEnvironment]:
+        """Create sandbox with serialized startup to prevent Docker overwhelm.
+
+        Even when Inspect schedules multiple samples in parallel (based on
+        max_sandboxes), this method serializes the actual `compose up` calls.
+        This prevents the Docker daemon from being overwhelmed by 50+ containers
+        starting simultaneously.
+
+        After containers start, a stabilization delay allows services to
+        initialize before releasing the semaphore for the next sample.
+        """
+        semaphore = await _get_startup_semaphore()
+
+        async with semaphore:
+            logger.debug(f"Starting Kathara stack for task '{task_name}'")
+            environments = await super().sample_init(task_name, config, metadata)
+
+            # Allow services to stabilize before releasing semaphore
+            # This gives FRR, BIND, and other services time to initialize
+            logger.debug(
+                f"Waiting {STARTUP_STABILIZATION_DELAY}s for services to stabilize"
+            )
+            await asyncio.sleep(STARTUP_STABILIZATION_DELAY)
+
+        logger.debug(f"Kathara stack ready for task '{task_name}'")
+        return environments
+
+
+# -----------------------------------------------------------------------------
+# Compose Generator Utilities
+# -----------------------------------------------------------------------------
 
 ROUTER_CAPABILITIES = ["NET_ADMIN", "SYS_ADMIN"]
 HOST_CAPABILITIES = ["NET_ADMIN"]
