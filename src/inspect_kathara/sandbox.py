@@ -182,6 +182,17 @@ HOST_CAPABILITIES = ["NET_ADMIN"]
 ROUTER_SYSCTLS = {"net.ipv4.ip_forward": "1"}
 
 
+class _LiteralStr(str):
+    """String wrapper so PyYAML dumps it as a literal block scalar (|)."""
+
+
+def _literal_str_representer(dumper, data):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style="|")
+
+
+yaml.add_representer(_LiteralStr, _literal_str_representer, Dumper=yaml.SafeDumper)
+
+
 def _find_startup_file(
     lab_path: Path,
     machine_name: str,
@@ -223,7 +234,6 @@ def generate_compose_for_inspect(
     lab_path: Path,
     startup_configs: dict[str, str] | None = None,
     default_machine: str | None = None,
-    subnet_base: str | None = None,
     startup_pattern: str | None = None,
 ) -> str:
     lab_conf_path = lab_path / "topology" / "lab.conf"
@@ -236,29 +246,30 @@ def generate_compose_for_inspect(
 
     all_domains: set[str] = set()
     for machine in lab_config.machines.values():
-        all_domains.update(machine.collision_domains)
+        all_domains.update(domain for _, domain in machine.collision_domains)
 
     services: dict[str, Any] = {}
     networks: dict[str, Any] = {
         domain: {
             "driver": "bridge",
             "internal": True,
-            "enable_ipv6": True,
-            "enable_ipv4": False,
+            "enable_ipv6": False,
+            "enable_ipv4": True,
             "ipam": {"config": []},
         }
         for idx, domain in enumerate(sorted(all_domains))
     }
+    # add a default machine
+    services["default"] = {
+        "image": DEFAULT_IMAGE,
+        "x-local": True,
+        "init": True,
+        "hostname": "default",
+        "cap_add": ROUTER_CAPABILITIES,
+        "command": "sleep infinity",
+    }
 
     machine_names = list(lab_config.machines.keys())
-    if default_machine is not None:
-        if default_machine not in lab_config.machines:
-            raise ValueError(
-                f"default_machine '{default_machine}' not found in lab.conf. Available machines: {', '.join(lab_config.machines.keys())}"
-            )
-        machine_names.remove(default_machine)
-        machine_names.insert(0, default_machine)
-
     for idx, machine_name in enumerate(machine_names):
         config = lab_config.machines[machine_name]
         image = config.image or DEFAULT_IMAGE
@@ -278,8 +289,12 @@ def generate_compose_for_inspect(
         if is_router:
             service["sysctls"] = ROUTER_SYSCTLS.copy()
 
+        # Connect to collision-domain networks with explicit interface_name (Compose spec)
         if config.collision_domains:
-            service["networks"] = list(config.collision_domains)
+            service["networks"] = {
+                domain: {"interface_name": f"eth{eth_index}"}
+                for eth_index, domain in sorted(config.collision_domains, key=lambda x: x[0])
+            }
 
         startup_script = _get_startup_script(lab_path, machine_name, startup_configs, startup_pattern)
         if startup_script:
@@ -303,35 +318,37 @@ def generate_compose_for_inspect(
         config_dir = lab_path / "topology" / machine_name
         if config_dir.exists() and config_dir.is_dir():
             service.setdefault("volumes", [])
-            service["volumes"].append(f"{config_dir}:/tmp/config:ro")
+            service["volumes"].append(f"./{config_dir.relative_to(lab_path).as_posix()}:/tmp/config:ro")
             copy_command = "cp -r /tmp/config/* /"
 
-        # Compose commands
-        service["command"] = "sh -lc '"
-
-        # Flush all addresses assigned by Docker
-        service["command"] += 'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush dev "$$d"; done; '
-        # Flush all default routes
-        service["command"] += 'for d in $(ls /sys/class/net | grep -v lo); do ip route flush dev "$$d"; done; '
-
+        # Compose commands: build as multiline for readable YAML (command: |- ...)
+        cmd_lines = [
+            "sh -lc '",
+            'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush dev "$$d"; done;',
+            'for d in $(ls /sys/class/net | grep -v lo); do ip route flush dev "$$d"; done;',
+        ]
         if copy_command:
-            service["command"] += f"{copy_command} && "
-
+            cmd_lines.append(copy_command)
         if startup_command:
-            service["command"] += f"{startup_command} && "
+            # Put each " && "-separated part on its own line when possible
+            for part in startup_command.split(" && "):
+                cmd_lines.append(part.strip())
+        cmd_lines.append("sleep infinity")
+        cmd_lines.append("'")
+        service["command"] = _LiteralStr("\n".join(cmd_lines))
 
-        service["command"] += "sleep infinity'"
-
-        if idx == 0 and machine_name != "default":
-            default_service = service.copy()
-            default_service["command"] = "sleep infinity"
-            default_service.pop("volumes", None)
-            services["default"] = default_service
         services[machine_name] = service
 
-    yaml_content = yaml.dump({"services": services, "networks": networks}, default_flow_style=False, sort_keys=False)
-    header = f"# Auto-generated from Kathara lab.conf\n# Machines: {', '.join(machine_names)}\n# Networks: {', '.join(sorted(all_domains))}\n\n"
-    return header + yaml_content
+    yaml_content = yaml.dump(
+        {"services": services, "networks": networks},
+        default_flow_style=False,
+        sort_keys=False,
+        Dumper=yaml.SafeDumper,
+    )
+    header = "# Auto-generated from Kathara lab.conf\n"
+    header += f"# Machines: {', '.join(machine_names)}\n# Networks: {', '.join(sorted(all_domains))}\n"
+    header += "# Per-network x-interface-name = eth0, eth1, ... (from lab.conf machine[0], machine[1], ...)\n\n"
+    return header + yaml_content  # compose
 
 
 def write_compose_for_lab(
@@ -346,7 +363,6 @@ def write_compose_for_lab(
         lab_path,
         startup_configs=startup_configs,
         default_machine=default_machine,
-        subnet_base=subnet_base,
         startup_pattern=startup_pattern,
     )
     output_path = output_path or lab_path / "compose.yaml"

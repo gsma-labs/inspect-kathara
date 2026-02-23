@@ -25,7 +25,7 @@ from typing import Any, TypedDict
 
 import yaml
 
-from inspect_kathara._util import MachineConfig, parse_lab_conf
+from inspect_kathara._util import parse_lab_conf
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ def generate_compose_from_lab_conf(
     # Collect all collision domains
     all_domains: set[str] = set()
     for machine in machines_config.values():
-        all_domains.update(machine.collision_domains)
+        all_domains.update(domain for _, domain in machine.collision_domains)
 
     services: dict[str, Any] = {}
     networks: dict[str, Any] = {}
@@ -158,11 +158,12 @@ def generate_compose_from_lab_conf(
         if is_router:
             service["sysctls"] = ROUTER_SYSCTLS.copy()
 
-        # Connect to collision domain networks
+        # Connect to collision domain networks with explicit interface_name (Compose spec)
         if config.collision_domains:
-            service["networks"] = {}
-            for domain in config.collision_domains:
-                service["networks"][domain] = {}
+            service["networks"] = {
+                domain: {"interface_name": f"eth{eth_index}"}
+                for eth_index, domain in sorted(config.collision_domains, key=lambda x: x[0])
+            }
 
         services[machine_name] = service
 

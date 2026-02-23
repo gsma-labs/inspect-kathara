@@ -57,13 +57,19 @@ IMAGE_CONFIGS: dict[str, dict[str, Any]] = {
 }
 
 
+def _images_dir() -> Path:
+    """Directory containing .dockerfile files, relative to this package."""
+    return Path(__file__).resolve().parent.parent / "images"
+
+
 def build_docker_image(image: str, docker_file: Path | None = None) -> str:
     if docker_file is None:
-        docker_file = Path(f"src/images/{image.split('/')[-1]}.dockerfile")
+        docker_file = _images_dir() / f"{image.split('/')[-1]}.dockerfile"
     if not docker_file.exists():
         raise ValueError(f"Docker file not found: {docker_file}")
 
-    subprocess.run(["docker", "build", "-t", image, "-f", docker_file, "."], check=True)
+    build_ctx = docker_file.resolve().parent
+    subprocess.run(["docker", "build", "-t", image, "-f", str(docker_file), "."], check=True, cwd=build_ctx)
     return image
 
 
@@ -75,8 +81,21 @@ def validate_kathara_image(image: str) -> str:
         .stdout.strip()
         .splitlines()
     )
-    if image not in local_images:
-        build_docker_image(image)
+    # Compare by repository name (image may include tag, e.g. kathara/frr:9)
+    image_repo = image.split(":")[0]
+    if image_repo in local_images:
+        return image
+    # Prefer pull from Docker registry (e.g. Docker Hub); fall back to local Dockerfile if not found
+    subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+    # Verify image exists locally (returncode alone is not reliable)
+    local_after = (
+        subprocess.run(["docker", "images", "--format", "{{.Repository}}"], check=True, capture_output=True, text=True)
+        .stdout.strip()
+        .splitlines()
+    )
+    if image_repo in local_after:
+        return image
+    build_docker_image(image)
     return image
 
 
@@ -93,13 +112,20 @@ def truncate_output(output: str, max_size: int = MAX_EXEC_OUTPUT) -> str:
 
 
 class MachineConfig:
+    """Machine config from lab.conf. collision_domains is (eth_index, domain) for deterministic interface order."""
+
     def __init__(self, name: str):
         self.name = name
-        self.collision_domains: list[str] = []
+        self.collision_domains: list[tuple[int, str]] = []
         self.image: str | None = None
 
+    def networks_in_eth_order(self) -> list[str]:
+        """Domain names in eth0, eth1, ... order for compose networks list."""
+        return [domain for _, domain in sorted(self.collision_domains, key=lambda x: x[0])]
+
     def __repr__(self) -> str:
-        return f"MachineConfig(name={self.name!r}, image={self.image!r}, domains={self.collision_domains})"
+        domains = [d for _, d in self.collision_domains]
+        return f"MachineConfig(name={self.name!r}, image={self.image!r}, domains={domains})"
 
 
 @dataclass
@@ -144,9 +170,9 @@ def parse_lab_conf(lab_conf_path: Path) -> LabConfig:
                         machines[machine_name] = MachineConfig(machine_name)
 
                     if bracket_content.isdigit():
-                        machines[machine_name].collision_domains.append(
-                            line.split("=")[1].strip().strip('"').split("/")[0].strip('"')
-                        )
+                        eth_index = int(bracket_content)
+                        domain = line.split("=")[1].strip().strip('"').split("/")[0].strip('"')
+                        machines[machine_name].collision_domains.append((eth_index, domain))
                     elif bracket_content.lower() == "image":
                         machines[machine_name].image = line.split("=")[1].strip().strip('"')
                 except (IndexError, ValueError):
