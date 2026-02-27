@@ -13,12 +13,7 @@ services:
     networks: &id002
     - lan1
     - lan2
-    command: sh -c 'ip addr add 10.0.1.100/24 dev eth0 && ip link set eth0 up && ip
-      addr add 10.0.2.100/24 dev eth1 && ip link set eth1 up && mkdir -p /root/.ssh
-      && echo "Host *" > /root/.ssh/config && echo "    StrictHostKeyChecking no"
-      >> /root/.ssh/config && echo "    UserKnownHostsFile /dev/null" >> /root/.ssh/config
-      && echo "    LogLevel ERROR" >> /root/.ssh/config && chmod 600 /root/.ssh/config
-      && sleep infinity'
+    command: sleep infinity
   management:
     image: kathara/base
     x-local: true
@@ -26,8 +21,10 @@ services:
     hostname: management
     cap_add: *id001
     networks: *id002
-    command: sh -c 'ip addr add 10.0.1.100/24 dev eth0 && ip link set eth0 up && ip
-      addr add 10.0.2.100/24 dev eth1 && ip link set eth1 up && mkdir -p /root/.ssh
+    command: sh -lc 'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush
+      dev "$$d"; done; for d in $(ls /sys/class/net | grep -v lo); do ip route flush
+      dev "$$d"; done; ip addr add 10.0.1.100/24 dev eth0 && ip link set eth0 up &&
+      ip addr add 10.0.2.100/24 dev eth1 && ip link set eth1 up && mkdir -p /root/.ssh
       && echo "Host *" > /root/.ssh/config && echo "    StrictHostKeyChecking no"
       >> /root/.ssh/config && echo "    UserKnownHostsFile /dev/null" >> /root/.ssh/config
       && echo "    LogLevel ERROR" >> /root/.ssh/config && chmod 600 /root/.ssh/config
@@ -40,23 +37,41 @@ services:
     cap_add: *id001
     networks:
     - lan1
-    command: sh -c 'ip addr add 10.0.1.10/24 dev eth0 && ip link set eth0 up && ip
-      route add default via 10.0.1.1 && mkdir -p /etc/ssh && echo "PermitRootLogin
-      yes" >> /etc/ssh/sshd_config && echo "PermitEmptyPasswords yes" >> /etc/ssh/sshd_config
-      && passwd -d root 2>/dev/null || true && /etc/init.d/ssh start 2>/dev/null ||
-      service ssh start 2>/dev/null || true && sleep infinity'
+    volumes:
+    - /home/p4/codes/inspect-kathara/examples/router_troubleshoot/scenarios/local_network/topology/pc1:/tmp/config:ro
+    command: sh -lc 'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush
+      dev "$$d"; done; for d in $(ls /sys/class/net | grep -v lo); do ip route flush
+      dev "$$d"; done; cp -r /tmp/config/* / && ip addr add 10.0.1.10/24 dev eth0
+      && ip link set eth0 up && ip route add default via 10.0.1.1 && mkdir -p /etc/ssh
+      && echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && echo "PermitEmptyPasswords
+      yes" >> /etc/ssh/sshd_config && passwd -d root 2>/dev/null || true && /etc/init.d/ssh
+      start 2>/dev/null || service ssh start 2>/dev/null || true && sleep infinity'
   router:
-    image: kathara/base
+    image: kathara/frr
     x-local: true
     init: true
     hostname: router
-    cap_add: *id001
+    cap_add:
+    - NET_ADMIN
+    - SYS_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: '1'
     networks:
     - lan1
     - lan2
-    command: sh -c 'ip addr add 10.0.1.1/24 dev eth0 && ip link set eth0 up && ip
-      addr add 10.0.2.1/24 dev eth1 && ip link set eth1 up && mkdir -p /etc/ssh &&
-      echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && echo "PermitEmptyPasswords
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pgrep -f frr
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    command: sh -lc 'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush
+      dev "$$d"; done; for d in $(ls /sys/class/net | grep -v lo); do ip route flush
+      dev "$$d"; done; ip addr add 10.0.1.1/24 dev eth0 && ip link set eth0 up &&
+      ip addr add 10.0.2.1/24 dev eth1 && ip link set eth1 up && mkdir -p /etc/ssh
+      && echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && echo "PermitEmptyPasswords
       yes" >> /etc/ssh/sshd_config && passwd -d root 2>/dev/null || true && /etc/init.d/ssh
       start 2>/dev/null || service ssh start 2>/dev/null || true && echo 1 > /proc/sys/net/ipv4/ip_forward
       2>/dev/null || sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true && sleep
@@ -69,8 +84,10 @@ services:
     cap_add: *id001
     networks:
     - lan2
-    command: sh -c 'ip addr add 10.0.2.10/24 dev eth0 && ip link set eth0 up && ip
-      route add default via 10.0.2.1 && mkdir -p /etc/ssh && echo "PermitRootLogin
+    command: sh -lc 'for d in $(ls /sys/class/net | grep -v lo); do ip addr flush
+      dev "$$d"; done; for d in $(ls /sys/class/net | grep -v lo); do ip route flush
+      dev "$$d"; done; ip addr add 10.0.2.10/24 dev eth0 && ip link set eth0 up &&
+      ip route add default via 10.0.2.1 && mkdir -p /etc/ssh && echo "PermitRootLogin
       yes" >> /etc/ssh/sshd_config && echo "PermitEmptyPasswords yes" >> /etc/ssh/sshd_config
       && passwd -d root 2>/dev/null || true && /etc/init.d/ssh start 2>/dev/null ||
       service ssh start 2>/dev/null || true && sleep infinity'
@@ -78,12 +95,14 @@ networks:
   lan1:
     driver: bridge
     internal: true
+    enable_ipv6: true
+    enable_ipv4: false
     ipam:
-      config:
-      - subnet: 172.28.0.0/28
+      config: []
   lan2:
     driver: bridge
     internal: true
+    enable_ipv6: true
+    enable_ipv4: false
     ipam:
-      config:
-      - subnet: 172.28.0.16/28
+      config: []

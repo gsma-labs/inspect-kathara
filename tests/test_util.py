@@ -87,9 +87,11 @@ router[1]="lan2"
         assert "pc1" in config.machines
         assert "pc2" in config.machines
         assert "router" in config.machines
-        assert "lan1" in config.machines["pc1"].collision_domains
-        assert "lan1" in config.machines["router"].collision_domains
-        assert "lan2" in config.machines["router"].collision_domains
+        domains_pc1 = [d for _, d in config.machines["pc1"].collision_domains]
+        domains_router = [d for _, d in config.machines["router"].collision_domains]
+        assert "lan1" in domains_pc1
+        assert "lan1" in domains_router
+        assert "lan2" in domains_router
 
     def test_parse_with_image(self):
         lab_conf = """

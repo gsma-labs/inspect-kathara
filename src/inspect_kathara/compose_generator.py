@@ -25,7 +25,7 @@ from typing import Any, TypedDict
 
 import yaml
 
-from inspect_kathara._util import MachineConfig, parse_lab_conf
+from inspect_kathara._util import parse_lab_conf
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ def generate_compose_from_lab_conf(
     # Collect all collision domains
     all_domains: set[str] = set()
     for machine in machines_config.values():
-        all_domains.update(machine.collision_domains)
+        all_domains.update(domain for _, domain in machine.collision_domains)
 
     services: dict[str, Any] = {}
     networks: dict[str, Any] = {}
@@ -158,11 +158,12 @@ def generate_compose_from_lab_conf(
         if is_router:
             service["sysctls"] = ROUTER_SYSCTLS.copy()
 
-        # Connect to collision domain networks
+        # Connect to collision domain networks with explicit interface_name (Compose spec)
         if config.collision_domains:
-            service["networks"] = {}
-            for domain in config.collision_domains:
-                service["networks"][domain] = {}
+            service["networks"] = {
+                domain: {"interface_name": f"eth{eth_index}"}
+                for eth_index, domain in sorted(config.collision_domains, key=lambda x: x[0])
+            }
 
         services[machine_name] = service
 
@@ -248,9 +249,7 @@ def generate_compose_from_topology(
             if machine_name in services:
                 if "networks" not in services[machine_name]:
                     services[machine_name]["networks"] = {}
-                services[machine_name]["networks"][net_name] = {
-                    "ipv4_address": ip_address
-                }
+                services[machine_name]["networks"][net_name] = {"ipv4_address": ip_address}
 
     compose_dict = {
         "services": services,
@@ -309,13 +308,9 @@ def _create_service_config(
         links_for_machine = machine_links.get(name, [])
         for link_idx, subnet in links_for_machine:
             iface = f"eth{link_idx}"
-            ip_with_mask = _get_ip_for_machine_in_link(
-                name, link_idx, subnet, machine_links
-            )
+            ip_with_mask = _get_ip_for_machine_in_link(name, link_idx, subnet, machine_links)
             if ip_with_mask:
-                startup_parts.append(
-                    f"ip addr add {ip_with_mask} dev {iface} 2>/dev/null || true"
-                )
+                startup_parts.append(f"ip addr add {ip_with_mask} dev {iface} 2>/dev/null || true")
                 startup_parts.append(f"ip link set {iface} up")
 
     if "startup" in config:
@@ -437,8 +432,7 @@ def validate_topology(topology: TopologyDefinition) -> list[str]:
         image = config.get("image", DEFAULT_IMAGE)
         if not image.startswith("kathara/"):
             logger.warning(
-                f"Machine {name} uses non-Kathara image: {image}. "
-                "Consider using kathara/* images for consistency."
+                f"Machine {name} uses non-Kathara image: {image}. Consider using kathara/* images for consistency."
             )
 
     return errors

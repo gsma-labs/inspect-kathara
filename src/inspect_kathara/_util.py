@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,20 +11,97 @@ DEFAULT_IMAGE = "kathara/base"
 
 IMAGE_CONFIGS: dict[str, dict[str, Any]] = {
     "kathara/frr": {"services": ["frr"], "startup_delay": 5, "routing_capable": True, "vtysh_available": True},
-    "kathara/quagga": {"services": ["zebra", "ospfd", "bgpd", "ripd"], "startup_delay": 5, "routing_capable": True, "vtysh_available": True},
-    "kathara/openbgpd": {"services": ["openbgpd"], "startup_delay": 3, "routing_capable": True, "vtysh_available": False},
+    "kathara/quagga": {
+        "services": ["zebra", "ospfd", "bgpd", "ripd"],
+        "startup_delay": 5,
+        "routing_capable": True,
+        "vtysh_available": True,
+    },
+    "kathara/openbgpd": {
+        "services": ["openbgpd"],
+        "startup_delay": 3,
+        "routing_capable": True,
+        "vtysh_available": False,
+    },
     "kathara/bird": {"services": ["bird"], "startup_delay": 3, "routing_capable": True, "vtysh_available": False},
     "kathara/bind": {"services": ["named"], "startup_delay": 3, "routing_capable": False, "vtysh_available": False},
-    "kathara/sdn": {"services": ["openvswitch-switch"], "startup_delay": 5, "routing_capable": False, "vtysh_available": False},
-    "kathara/p4": {"services": ["simple_switch_grpc"], "startup_delay": 5, "routing_capable": False, "vtysh_available": False},
+    "kathara/sdn": {
+        "services": ["openvswitch-switch"],
+        "startup_delay": 5,
+        "routing_capable": True,
+        "vtysh_available": False,
+    },
+    "kathara/p4": {
+        "services": ["simple_switch_grpc"],
+        "startup_delay": 5,
+        "routing_capable": True,
+        "vtysh_available": False,
+    },
     "kathara/scion": {"services": [], "startup_delay": 8, "routing_capable": False, "vtysh_available": False},
     "kathara/base": {"services": [], "startup_delay": 1, "routing_capable": False, "vtysh_available": False},
+    # NIKA images
+    "kathara/nika-base": {"services": [], "startup_delay": 1, "routing_capable": False, "vtysh_available": False},
+    "kathara/nika-frr": {"services": ["frr"], "startup_delay": 5, "routing_capable": True, "vtysh_available": True},
+    "kathara/nika-wireguard": {
+        "services": ["wireguard"],
+        "startup_delay": 5,
+        "routing_capable": False,
+        "vtysh_available": False,
+    },
+    "kathara/nika-ryu": {
+        "services": ["ryu-manager"],
+        "startup_delay": 3,
+        "routing_capable": True,
+        "vtysh_available": False,
+    },
+    "kathara/nika-influxdb": {
+        "services": ["influx"],
+        "startup_delay": 3,
+        "routing_capable": False,
+        "vtysh_available": False,
+    },
 }
+
+
+def _images_dir() -> Path:
+    """Directory containing .dockerfile files, relative to this package."""
+    return Path(__file__).resolve().parent.parent / "images"
+
+
+def build_docker_image(image: str, docker_file: Path | None = None) -> str:
+    if docker_file is None:
+        docker_file = _images_dir() / f"{image.split('/')[-1]}.dockerfile"
+    if not docker_file.exists():
+        raise ValueError(f"Docker file not found: {docker_file}")
+
+    build_ctx = docker_file.resolve().parent
+    subprocess.run(["docker", "build", "-t", image, "-f", str(docker_file), "."], check=True, cwd=build_ctx)
+    return image
 
 
 def validate_kathara_image(image: str) -> str:
     if not image.startswith("kathara/"):
         raise ValueError(f"Only kathara/* images allowed, got: {image}")
+    local_images = (
+        subprocess.run(["docker", "images", "--format", "{{.Repository}}"], check=True, capture_output=True, text=True)
+        .stdout.strip()
+        .splitlines()
+    )
+    # Compare by repository name (image may include tag, e.g. kathara/frr:9)
+    image_repo = image.split(":")[0]
+    if image_repo in local_images:
+        return image
+    # Prefer pull from Docker registry (e.g. Docker Hub); fall back to local Dockerfile if not found
+    subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+    # Verify image exists locally (returncode alone is not reliable)
+    local_after = (
+        subprocess.run(["docker", "images", "--format", "{{.Repository}}"], check=True, capture_output=True, text=True)
+        .stdout.strip()
+        .splitlines()
+    )
+    if image_repo in local_after:
+        return image
+    build_docker_image(image)
     return image
 
 
@@ -40,13 +118,20 @@ def truncate_output(output: str, max_size: int = MAX_EXEC_OUTPUT) -> str:
 
 
 class MachineConfig:
+    """Machine config from lab.conf. collision_domains is (eth_index, domain) for deterministic interface order."""
+
     def __init__(self, name: str):
         self.name = name
-        self.collision_domains: list[str] = []
+        self.collision_domains: list[tuple[int, str]] = []
         self.image: str | None = None
 
+    def networks_in_eth_order(self) -> list[str]:
+        """Domain names in eth0, eth1, ... order for compose networks list."""
+        return [domain for _, domain in sorted(self.collision_domains, key=lambda x: x[0])]
+
     def __repr__(self) -> str:
-        return f"MachineConfig(name={self.name!r}, image={self.image!r}, domains={self.collision_domains})"
+        domains = [d for _, d in self.collision_domains]
+        return f"MachineConfig(name={self.name!r}, image={self.image!r}, domains={domains})"
 
 
 @dataclass
@@ -75,7 +160,14 @@ def parse_lab_conf(lab_conf_path: Path) -> LabConfig:
                         bracket_content = line.split("[")[1].split("]")[0].strip()
                         value = line.split("=", 1)[1].strip().strip('"')
                         metadata[f"{machine_name}_{bracket_content}".upper()] = value
-                        if machine_name == "LAB" or bracket_content.lower() in ("name", "description", "author", "email", "version", "web"):
+                        if machine_name == "LAB" or bracket_content.lower() in (
+                            "name",
+                            "description",
+                            "author",
+                            "email",
+                            "version",
+                            "web",
+                        ):
                             metadata[machine_name] = value
                         continue
 
@@ -84,7 +176,9 @@ def parse_lab_conf(lab_conf_path: Path) -> LabConfig:
                         machines[machine_name] = MachineConfig(machine_name)
 
                     if bracket_content.isdigit():
-                        machines[machine_name].collision_domains.append(line.split("=")[1].strip().strip('"').split("/")[0].strip('"'))
+                        eth_index = int(bracket_content)
+                        domain = line.split("=")[1].strip().strip('"').split("/")[0].strip('"')
+                        machines[machine_name].collision_domains.append((eth_index, domain))
                     elif bracket_content.lower() == "image":
                         machines[machine_name].image = line.split("=")[1].strip().strip('"')
                 except (IndexError, ValueError):

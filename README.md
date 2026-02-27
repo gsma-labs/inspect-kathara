@@ -30,6 +30,12 @@ Or with uv:
 uv add inspect-kathara
 ```
 
+Optional: install the `memory` extra for automatic concurrency scaling based on system RAM (recommended for production):
+
+```bash
+pip install inspect-kathara[memory]
+```
+
 ## Quick Start
 
 ### 1. Create a network topology
@@ -59,6 +65,8 @@ networks:
 ```
 
 ### 2. Create an evaluation task
+
+You can use either the generic **docker** sandbox (path to compose file or directory containing `compose.yaml`) or the **kathara** sandbox type, which adds memory-based concurrency limits and serialized startup:
 
 ```python
 from inspect_ai import Task, task
@@ -117,16 +125,35 @@ from inspect_ai.util import sandbox
 # Execute command on another container
 result = await sandbox("pc2").exec(["ping", "-c", "1", "10.0.1.10"])
 
-# Read/write files
-content = await sandbox("router").read_file("/etc/hosts")
-await sandbox("router").write_file("/tmp/config", "data")
-```
+| Image | Description | Routing | vtysh |
+|-------|-------------|---------|-------|
+| `kathara/base` | Base Debian with network tools | No | No |
+| `kathara/frr` | FRRouting (BGP, OSPF, IS-IS) | Yes | Yes |
+| `kathara/quagga` | Quagga routing suite | Yes | Yes |
+| `kathara/openbgpd` | OpenBGPD daemon | Yes | No |
+| `kathara/bird` | BIRD routing daemon | Yes | No |
+| `kathara/bind` | BIND DNS server | No | No |
+| `kathara/sdn` | OpenVSwitch + SDN | Yes | No |
+| `kathara/p4` | P4 programmable switches | Yes | No |
+| `kathara/scion` | SCION architecture | No | No |
+| `kathara/nika-base` | NIKA base image | No | No |
+| `kathara/nika-frr` | NIKA FRR image | Yes | Yes |
+| `kathara/nika-wireguard` | NIKA WireGuard | No | No |
+| `kathara/nika-ryu` | NIKA Ryu controller | Yes | No |
+| `kathara/nika-influxdb` | NIKA InfluxDB | No | No |
+
+## Project Structure
+
+- **`src/inspect_kathara/`** – Main package: `sandbox.py` (compose generation + Kathara sandbox env), `_util.py` (lab parsing, image configs), `compose_generator.py` (low-level compose from lab.conf/topology dict).
+- **`src/images/`** – Dockerfiles for NIKA images (`nika-base`, `nika-frr`, `nika-nginx`, etc.).
+- **`tests/`** – Pytest tests.
+- **`examples/`** – Full Inspect AI evaluation examples.
 
 ## Examples
 
-- **[Router Troubleshooting Tutorial](docs/router_troubleshooting.md)** — Step-by-step guide to building a network diagnostic evaluation
+See the [`examples/`](./examples/) directory:
 
-## Supported Images
+- **`router_troubleshoot/`** – Network troubleshooting evaluation with 15 fault-injection scenarios (iptables, sysctl, routing, etc.). See [examples/router_troubleshoot/README.md](./examples/router_troubleshoot/README.md) for topology and variants.
 
 | Image | Description |
 |-------|-------------|

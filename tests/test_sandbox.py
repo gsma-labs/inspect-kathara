@@ -1,11 +1,14 @@
 """Tests for inspect_kathara.sandbox module."""
 
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
 
 import pytest
+import yaml
 
+from inspect_kathara._util import validate_kathara_image
 from inspect_kathara.sandbox import (
     KatharaSandboxEnvironment,
     _calculate_safe_concurrency,
@@ -71,17 +74,13 @@ class TestConcurrencyCalculation:
 
             # The function should gracefully handle missing psutil
             # Note: Due to caching, we mock the import directly
-            with mock.patch(
-                "inspect_kathara.sandbox._calculate_safe_concurrency"
-            ) as mock_calc:
+            with mock.patch("inspect_kathara.sandbox._calculate_safe_concurrency") as mock_calc:
                 mock_calc.return_value = 1
                 assert mock_calc() == 1
 
     def test_returns_1_on_psutil_exception(self):
         """Returns 1 when psutil raises an exception."""
-        with mock.patch(
-            "psutil.virtual_memory", side_effect=RuntimeError("Memory check failed")
-        ):
+        with mock.patch("psutil.virtual_memory", side_effect=RuntimeError("Memory check failed")):
             assert _calculate_safe_concurrency() == 1
 
     def test_boundary_exactly_at_thresholds(self):
@@ -115,7 +114,8 @@ pc2[0]="lan2"
 """
         with tempfile.TemporaryDirectory() as tmpdir:
             lab_path = Path(tmpdir)
-            (lab_path / "lab.conf").write_text(lab_conf)
+            (lab_path / "topology").mkdir(parents=True, exist_ok=True)
+            (lab_path / "topology" / "lab.conf").write_text(lab_conf)
 
             compose = generate_compose_for_inspect(lab_path)
 
@@ -128,10 +128,13 @@ pc2[0]="lan2"
         lab_conf = """
 pc1[0]="lan1"
 router[0]="lan1"
+pc1[image]="kathara/base"
+router[image]="kathara/frr"
 """
         with tempfile.TemporaryDirectory() as tmpdir:
             lab_path = Path(tmpdir)
-            (lab_path / "lab.conf").write_text(lab_conf)
+            (lab_path / "topology").mkdir(parents=True, exist_ok=True)
+            (lab_path / "topology" / "lab.conf").write_text(lab_conf)
 
             compose = generate_compose_for_inspect(lab_path, default_machine="router")
 
@@ -149,10 +152,46 @@ router[0]="lan1"
         lab_conf = """pc1[0]="lan1" """
         with tempfile.TemporaryDirectory() as tmpdir:
             lab_path = Path(tmpdir)
-            (lab_path / "lab.conf").write_text(lab_conf)
+            (lab_path / "topology").mkdir(parents=True, exist_ok=True)
+            (lab_path / "topology" / "lab.conf").write_text(lab_conf)
 
             with pytest.raises(ValueError, match="not found in lab.conf"):
                 generate_compose_for_inspect(lab_path, default_machine="nonexistent")
+
+    def test_generate_with_startup_configs(self):
+        lab_conf = """pc1[0]="lan1" """
+        startup_script = "echo 'Hello, World!' > /tmp/config/pc1.txt"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab_path = Path(tmpdir)
+            (lab_path / "topology").mkdir(parents=True, exist_ok=True)
+            (lab_path / "topology" / "lab.conf").write_text(lab_conf)
+            (lab_path / "topology" / "pc1.startup").write_text(startup_script)
+            compose = generate_compose_for_inspect(lab_path)
+            compose_dict = yaml.safe_load(compose)
+
+        assert "Hello, World!" in compose_dict["services"]["pc1"]["command"]
+
+    def test_generate_with_copy_config_files(self):
+        lab_conf = """
+pc1[0]="lan1"
+router[0]="lan1"
+pc1[image]="kathara/base"
+router[image]="kathara/frr"
+"""
+        config_file = "pc1.conf"
+        config_script = "echo 'Hello, World!' > /tmp/config/pc1.txt"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab_path = Path(tmpdir)
+            (lab_path / "topology").mkdir(parents=True, exist_ok=True)
+            (lab_path / "topology" / "lab.conf").write_text(lab_conf)
+            (lab_path / "topology" / "pc1").mkdir(parents=True, exist_ok=True)
+            (lab_path / "topology" / "pc1" / config_file).write_text(config_script)
+            compose = generate_compose_for_inspect(lab_path)
+            compose_dict = yaml.safe_load(compose)
+            assert "volumes" in compose_dict["services"]["pc1"]
+            assert "cp -r /tmp/config/*" in compose_dict["services"]["pc1"]["command"]
 
 
 class TestGetMachineServiceMapping:
@@ -166,10 +205,29 @@ pc2[0]="lan1"
 """
         with tempfile.TemporaryDirectory() as tmpdir:
             lab_path = Path(tmpdir)
-            (lab_path / "lab.conf").write_text(lab_conf)
+            (lab_path / "topology").mkdir(parents=True, exist_ok=True)
+            (lab_path / "topology" / "lab.conf").write_text(lab_conf)
 
             mapping = get_machine_service_mapping(lab_path)
 
         # First machine should map to "default"
         first_machine = list(mapping.keys())[0]
         assert mapping[first_machine] == "default"
+
+
+class TestKatharaImages:
+    """Tests for kathara images."""
+
+    def test_validate_kathara_image(self):
+        assert validate_kathara_image("kathara/base") == "kathara/base"
+
+    def test_validate_nika_image(self):
+        assert validate_kathara_image("kathara/nika-base") == "kathara/nika-base"
+        local_images = (
+            subprocess.run(
+                ["docker", "images", "--format", "{{.Repository}}"], check=True, capture_output=True, text=True
+            )
+            .stdout.strip()
+            .splitlines()
+        )
+        assert "kathara/nika-base" in local_images

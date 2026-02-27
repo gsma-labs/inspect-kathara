@@ -23,6 +23,7 @@ def __getattr__(name: str) -> object:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module, attr = _LAZY_IMPORTS[name]
     from importlib import import_module
+
     return getattr(import_module(f"inspect_kathara.{module}"), attr)
 
 
