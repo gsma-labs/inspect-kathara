@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import yaml
 
 from inspect_kathara.sandbox import (
     KatharaSandboxEnvironment,
@@ -134,9 +135,11 @@ router[0]="lan1"
             (lab_path / "lab.conf").write_text(lab_conf)
 
             compose = generate_compose_for_inspect(lab_path, default_machine="router")
+            compose_dict = yaml.safe_load(compose)
 
-        # Default machine should be first and mapped to "default" service
-        assert "default:" in compose
+        assert "default" in compose_dict["services"]
+        assert "router" in compose_dict["services"]
+        assert compose_dict["services"]["default"]["hostname"] == "router"
 
     def test_generate_missing_lab_conf_raises(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -158,7 +161,7 @@ router[0]="lan1"
 class TestGetMachineServiceMapping:
     """Tests for get_machine_service_mapping."""
 
-    def test_mapping_first_is_default(self):
+    def test_mapping_is_identity(self):
         lab_conf = """
 pc1[0]="lan1"
 router[0]="lan1"
@@ -170,6 +173,4 @@ pc2[0]="lan1"
 
             mapping = get_machine_service_mapping(lab_path)
 
-        # First machine should map to "default"
-        first_machine = list(mapping.keys())[0]
-        assert mapping[first_machine] == "default"
+        assert mapping == {"pc1": "pc1", "router": "router", "pc2": "pc2"}

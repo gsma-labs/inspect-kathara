@@ -192,6 +192,42 @@ def _allocate_subnet(idx: int, base: str = "172.28") -> str:
     return f"{base}.{idx // 16}.{(idx % 16) * 16}/28"
 
 
+def _build_networks(domains: set[str], subnet_base: str) -> dict[str, Any]:
+    networks: dict[str, Any] = {}
+    for idx, domain in enumerate(sorted(domains)):
+        networks[domain] = {
+            "driver": "bridge",
+            "internal": True,
+            "ipam": {"config": [{"subnet": _allocate_subnet(idx, subnet_base)}]},
+        }
+    return networks
+
+
+def _resolve_machine_order(
+    machine_names: list[str], default_machine: str | None
+) -> list[str]:
+    if default_machine is None:
+        return machine_names
+    if default_machine not in machine_names:
+        available = ", ".join(machine_names)
+        raise ValueError(
+            f"default_machine '{default_machine}' not found in lab.conf. "
+            f"Available machines: {available}"
+        )
+    ordered = machine_names.copy()
+    ordered.remove(default_machine)
+    ordered.insert(0, default_machine)
+    return ordered
+
+
+def _build_service_command(startup_script: str | None) -> str:
+    if not startup_script:
+        return "sleep infinity"
+    startup_script = startup_script.rstrip()
+    separator = " " if startup_script.endswith("&") else " && "
+    return f"sh -c '{startup_script}{separator}sleep infinity'"
+
+
 def _find_startup_file(
     lab_path: Path,
     machine_name: str,
@@ -207,9 +243,16 @@ def _find_startup_file(
             Default: "topology/{name}/{name}.startup" (Nika convention).
             Example: "{name}.startup" (flat structure).
     """
-    pattern = startup_pattern or "topology/{name}/{name}.startup"
-    startup_path = lab_path / pattern.format(name=machine_name)
-    return startup_path if startup_path.exists() else None
+    if startup_pattern is not None:
+        startup_path = lab_path / startup_pattern.format(name=machine_name)
+        return startup_path if startup_path.exists() else None
+
+    # Support both nested (Nika) and flat startup file layouts.
+    candidates = (
+        lab_path / f"topology/{machine_name}/{machine_name}.startup",
+        lab_path / f"{machine_name}.startup",
+    )
+    return next((path for path in candidates if path.exists()), None)
 
 
 def _get_startup_script(
@@ -256,24 +299,14 @@ def generate_compose_for_inspect(
         all_domains.update(machine.collision_domains)
 
     services: dict[str, Any] = {}
-    networks: dict[str, Any] = {
-        domain: {"driver": "bridge", "internal": True, "ipam": {"config": [{"subnet": _allocate_subnet(idx, subnet_base)}]}}
-        for idx, domain in enumerate(sorted(all_domains))
-    }
+    networks = _build_networks(all_domains, subnet_base)
+    machine_names = _resolve_machine_order(list(lab_config.machines.keys()), default_machine)
 
-    machine_names = list(lab_config.machines.keys())
-    if default_machine is not None:
-        if default_machine not in lab_config.machines:
-            raise ValueError(f"default_machine '{default_machine}' not found in lab.conf. Available machines: {', '.join(lab_config.machines.keys())}")
-        machine_names.remove(default_machine)
-        machine_names.insert(0, default_machine)
-
-    for idx, machine_name in enumerate(machine_names):
+    for machine_name in machine_names:
         config = lab_config.machines[machine_name]
         image = config.image or DEFAULT_IMAGE
         validate_kathara_image(image)
         is_router = is_routing_image(image)
-        service_name = "default" if idx == 0 else machine_name
 
         service: dict[str, Any] = {
             "image": image,
@@ -289,13 +322,10 @@ def generate_compose_for_inspect(
         if config.collision_domains:
             service["networks"] = list(config.collision_domains)
 
-        startup_script = _get_startup_script(lab_path, machine_name, startup_configs, startup_pattern)
-        service["command"] = "sleep infinity"
-        if startup_script:
-            # Use space instead of && if script ends with & (background process)
-            startup_script = startup_script.rstrip()
-            separator = " " if startup_script.endswith("&") else " && "
-            service["command"] = f"sh -c '{startup_script}{separator}sleep infinity'"
+        startup_script = _get_startup_script(
+            lab_path, machine_name, startup_configs, startup_pattern
+        )
+        service["command"] = _build_service_command(startup_script)
 
         # Add health check for images with services (e.g., named for bind, frr for routers)
         expected_services = get_image_services(image)
@@ -310,12 +340,21 @@ def generate_compose_for_inspect(
                 "start_period": "5s",
             }
 
-        services[service_name] = service
-        if idx == 0 and machine_name != "default":
-            services[machine_name] = service.copy()
+        services[machine_name] = service
 
-    yaml_content = yaml.dump({"services": services, "networks": networks}, default_flow_style=False, sort_keys=False)
-    header = f"# Auto-generated from Kathara lab.conf\n# Machines: {', '.join(machine_names)}\n# Networks: {', '.join(sorted(all_domains))}\n\n"
+    if machine_names and "default" not in services:
+        services["default"] = services[machine_names[0]].copy()
+
+    yaml_content = yaml.dump(
+        {"services": services, "networks": networks},
+        default_flow_style=False,
+        sort_keys=False,
+    )
+    header = (
+        "# Auto-generated from Kathara lab.conf\n"
+        f"# Machines: {', '.join(machine_names)}\n"
+        f"# Networks: {', '.join(sorted(all_domains))}\n\n"
+    )
     return header + yaml_content
 
 
@@ -346,7 +385,7 @@ def get_machine_service_mapping(lab_path: Path) -> dict[str, str]:
         raise FileNotFoundError(f"lab.conf not found at {lab_conf_path}")
 
     machine_names = list(parse_lab_conf(lab_conf_path).machines.keys())
-    return {name: ("default" if idx == 0 else name) for idx, name in enumerate(machine_names)}
+    return {name: name for name in machine_names}
 
 
 def estimate_startup_time(lab_path: Path) -> int:
@@ -364,5 +403,4 @@ def get_frr_services(lab_path: Path) -> list[str]:
         return []
 
     lab_config = parse_lab_conf(lab_conf_path)
-    mapping = get_machine_service_mapping(lab_path)
-    return [mapping.get(name, name) for name in get_frr_machines(lab_config.machines)]
+    return get_frr_machines(lab_config.machines)

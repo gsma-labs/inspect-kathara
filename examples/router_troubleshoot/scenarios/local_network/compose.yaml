@@ -3,7 +3,7 @@
 # Networks: lan1, lan2
 
 services:
-  default:
+  management:
     image: kathara/base
     x-local: true
     init: true
@@ -13,19 +13,6 @@ services:
     networks: &id002
     - lan1
     - lan2
-    command: sh -c 'ip addr add 10.0.1.100/24 dev eth0 && ip link set eth0 up && ip
-      addr add 10.0.2.100/24 dev eth1 && ip link set eth1 up && mkdir -p /root/.ssh
-      && echo "Host *" > /root/.ssh/config && echo "    StrictHostKeyChecking no"
-      >> /root/.ssh/config && echo "    UserKnownHostsFile /dev/null" >> /root/.ssh/config
-      && echo "    LogLevel ERROR" >> /root/.ssh/config && chmod 600 /root/.ssh/config
-      && sleep infinity'
-  management:
-    image: kathara/base
-    x-local: true
-    init: true
-    hostname: management
-    cap_add: *id001
-    networks: *id002
     command: sh -c 'ip addr add 10.0.1.100/24 dev eth0 && ip link set eth0 up && ip
       addr add 10.0.2.100/24 dev eth1 && ip link set eth1 up && mkdir -p /root/.ssh
       && echo "Host *" > /root/.ssh/config && echo "    StrictHostKeyChecking no"
@@ -74,6 +61,19 @@ services:
       yes" >> /etc/ssh/sshd_config && echo "PermitEmptyPasswords yes" >> /etc/ssh/sshd_config
       && passwd -d root 2>/dev/null || true && /etc/init.d/ssh start 2>/dev/null ||
       service ssh start 2>/dev/null || true && sleep infinity'
+  default:
+    image: kathara/base
+    x-local: true
+    init: true
+    hostname: management
+    cap_add: *id001
+    networks: *id002
+    command: sh -c 'ip addr add 10.0.1.100/24 dev eth0 && ip link set eth0 up && ip
+      addr add 10.0.2.100/24 dev eth1 && ip link set eth1 up && mkdir -p /root/.ssh
+      && echo "Host *" > /root/.ssh/config && echo "    StrictHostKeyChecking no"
+      >> /root/.ssh/config && echo "    UserKnownHostsFile /dev/null" >> /root/.ssh/config
+      && echo "    LogLevel ERROR" >> /root/.ssh/config && chmod 600 /root/.ssh/config
+      && sleep infinity'
 networks:
   lan1:
     driver: bridge
