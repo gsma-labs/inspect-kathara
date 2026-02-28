@@ -57,6 +57,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/inspect_kathara"]
 
+[tool.hatch.build.force-include]
+"src/images" = "inspect_kathara/images"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
