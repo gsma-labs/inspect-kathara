@@ -64,8 +64,8 @@ IMAGE_CONFIGS: dict[str, dict[str, Any]] = {
 
 
 def _images_dir() -> Path:
-    """Directory containing .dockerfile files, relative to this package."""
-    return Path(__file__).resolve().parent.parent / "images"
+    """Directory containing .dockerfile files, inside this package."""
+    return Path(__file__).resolve().parent / "images"
 
 
 def build_docker_image(image: str, docker_file: Path | None = None) -> str:
