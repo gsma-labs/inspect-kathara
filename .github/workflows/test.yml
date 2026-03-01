@@ -47,5 +47,6 @@ jobs:
 
       - name: Check package
         run: |
-          uv pip install dist/*.whl --system
-          python -c "from inspect_kathara import write_compose_for_lab; print('Import OK')"
+          uv venv .check-venv
+          uv pip install dist/*.whl -p .check-venv
+          .check-venv/bin/python -c "from inspect_kathara import write_compose_for_lab; print('Import OK')"
