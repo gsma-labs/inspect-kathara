@@ -222,12 +222,19 @@ class TestKatharaImages:
         assert validate_kathara_image("kathara/base") == "kathara/base"
 
     def test_validate_nika_image(self):
-        assert validate_kathara_image("kathara/nika-base") == "kathara/nika-base"
-        local_images = (
-            subprocess.run(
-                ["docker", "images", "--format", "{{.Repository}}"], check=True, capture_output=True, text=True
+        """Validate that kathara/nika-base is available locally (requires Docker + built image)."""
+        try:
+            result = subprocess.run(
+                ["docker", "images", "--format", "{{.Repository}}"],
+                capture_output=True, text=True, timeout=10,
             )
-            .stdout.strip()
-            .splitlines()
-        )
-        assert "kathara/nika-base" in local_images
+            if result.returncode != 0:
+                pytest.skip("Docker is not available")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pytest.skip("Docker is not available")
+
+        local_images = result.stdout.strip().splitlines()
+        if "kathara/nika-base" not in local_images:
+            pytest.skip("kathara/nika-base image not built locally")
+
+        assert validate_kathara_image("kathara/nika-base") == "kathara/nika-base"

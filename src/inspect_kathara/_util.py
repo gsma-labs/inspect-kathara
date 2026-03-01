@@ -64,8 +64,8 @@ IMAGE_CONFIGS: dict[str, dict[str, Any]] = {
 
 
 def _images_dir() -> Path:
-    """Directory containing .dockerfile files, relative to this package."""
-    return Path(__file__).resolve().parent.parent / "images"
+    """Directory containing .dockerfile files, inside this package."""
+    return Path(__file__).resolve().parent / "images"
 
 
 def build_docker_image(image: str, docker_file: Path | None = None) -> str:
@@ -203,20 +203,20 @@ def get_image_config(image: str) -> dict[str, Any]:
 
 
 def is_routing_image(image: str) -> bool:
-    return get_image_config(image).get("routing_capable", False)
+    return bool(get_image_config(image).get("routing_capable", False))
 
 
 def has_vtysh(image: str) -> bool:
-    return get_image_config(image).get("vtysh_available", False)
+    return bool(get_image_config(image).get("vtysh_available", False))
 
 
 def get_startup_delay(image: str) -> int:
-    return get_image_config(image).get("startup_delay", 1)
+    return int(get_image_config(image).get("startup_delay", 1))
 
 
 def get_image_services(image: str) -> list[str]:
     """Get the list of services that should be running for an image."""
-    return get_image_config(image).get("services", [])
+    return list(get_image_config(image).get("services", []))
 
 
 def get_router_machines(machines: dict[str, MachineConfig]) -> list[str]:

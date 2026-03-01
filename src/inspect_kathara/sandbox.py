@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from inspect_ai.util._sandbox.docker.docker import DockerSandboxEnvironment
 from inspect_ai.util._sandbox.environment import (
     SandboxEnvironment,
@@ -93,6 +94,70 @@ def _calculate_safe_concurrency() -> int:
 
 
 # -----------------------------------------------------------------------------
+# Self-Healing Helpers
+# -----------------------------------------------------------------------------
+
+
+def _prune_stale_networks(prefix: str = "inspect-") -> None:
+    """Remove orphaned Docker networks left by crashed runs.
+
+    Kathara compose stacks allocate hardcoded /28 subnets. If a previous run
+    crashed without cleanup, those networks persist and cause
+    "Pool overlaps with other one on this address space" errors on re-run.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "network", "ls", "--filter", f"name={prefix}", "--format", "{{.Name}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return
+        stale = [n for n in result.stdout.strip().splitlines() if n]
+        for net in stale:
+            # Only remove networks that have zero connected containers
+            info = subprocess.run(
+                ["docker", "network", "inspect", net, "--format", "{{len .Containers}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if info.returncode == 0 and info.stdout.strip() == "0":
+                subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=10)
+                logger.debug(f"Removed stale network: {net}")
+    except Exception as e:
+        logger.warning(f"Failed to prune stale networks: {e}")
+
+
+def _ensure_images_available(config: SandboxEnvironmentConfigType | None) -> None:
+    """Pre-validate Docker images before compose up.
+
+    Parses the compose YAML referenced by *config* and calls
+    ``validate_kathara_image()`` for every ``kathara/*`` image found.
+    This triggers the pull-or-build fallback **before** Docker Compose
+    attempts to start containers, giving clear error messages.
+    """
+    if config is None:
+        return
+    compose_path = Path(str(config))
+    if not compose_path.exists():
+        return
+    try:
+        with open(compose_path) as f:
+            compose = yaml.safe_load(f)
+        services = compose.get("services", {})
+        seen: set[str] = set()
+        for svc in services.values():
+            image = svc.get("image", "")
+            if image.startswith("kathara/") and image not in seen:
+                seen.add(image)
+                validate_kathara_image(image)
+    except Exception as e:
+        logger.warning(f"Image pre-validation failed (will retry at compose up): {e}")
+
+
+# -----------------------------------------------------------------------------
 # Kathara Sandbox Environment
 # -----------------------------------------------------------------------------
 
@@ -162,6 +227,8 @@ class KatharaSandboxEnvironment(DockerSandboxEnvironment):
 
         async with semaphore:
             logger.debug(f"Starting Kathara stack for task '{task_name}'")
+            _prune_stale_networks()
+            _ensure_images_available(config)
             environments = await super().sample_init(task_name, config, metadata)
 
             # Allow services to stabilize before releasing semaphore
@@ -243,6 +310,9 @@ def generate_compose_for_inspect(
     lab_config = parse_lab_conf(lab_conf_path)
     if not lab_config.machines:
         raise ValueError(f"No machines found in {lab_conf_path}")
+
+    if default_machine and default_machine not in lab_config.machines:
+        raise ValueError(f"Default machine '{default_machine}' not found in lab.conf")
 
     all_domains: set[str] = set()
     for machine in lab_config.machines.values():
@@ -354,7 +424,7 @@ def generate_compose_for_inspect(
 
         services[machine_name] = service
 
-    yaml_content = yaml.dump(
+    yaml_content: str = yaml.dump(
         {"services": services, "networks": networks},
         default_flow_style=False,
         sort_keys=False,
