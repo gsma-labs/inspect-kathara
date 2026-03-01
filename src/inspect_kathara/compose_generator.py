@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any, TypedDict
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from inspect_kathara._util import parse_lab_conf
 
@@ -119,14 +119,14 @@ def generate_compose_from_lab_conf(
     Returns:
         Docker Compose YAML content as string
     """
-    machines_config = parse_lab_conf(lab_conf_path)
+    lab_config = parse_lab_conf(lab_conf_path)
 
-    if not machines_config:
+    if not lab_config.machines:
         raise ValueError(f"No machines found in {lab_conf_path}")
 
     # Collect all collision domains
     all_domains: set[str] = set()
-    for machine in machines_config.values():
+    for machine in lab_config.machines.values():
         all_domains.update(domain for _, domain in machine.collision_domains)
 
     services: dict[str, Any] = {}
@@ -143,7 +143,7 @@ def generate_compose_from_lab_conf(
         }
 
     # Create service definitions for machines
-    for machine_name, config in machines_config.items():
+    for machine_name, config in lab_config.machines.items():
         image = config.image or DEFAULT_IMAGE
         is_router = _is_router_image(image)
 
@@ -173,10 +173,10 @@ def generate_compose_from_lab_conf(
     }
 
     # Add header comment
-    yaml_content = yaml.dump(compose_dict, default_flow_style=False, sort_keys=False)
+    yaml_content: str = yaml.dump(compose_dict, default_flow_style=False, sort_keys=False)
     header = f"# Auto-generated from lab.conf for lab: {lab_name}\n"
     header += "# Reference only - actual deployment uses Kathara API\n"
-    header += f"# Machines: {', '.join(machines_config.keys())}\n"
+    header += f"# Machines: {', '.join(lab_config.machines.keys())}\n"
     header += f"# Collision domains: {', '.join(sorted(all_domains))}\n\n"
 
     return header + yaml_content
@@ -257,7 +257,7 @@ def generate_compose_from_topology(
     }
 
     # Add header comment
-    yaml_content = yaml.dump(compose_dict, default_flow_style=False, sort_keys=False)
+    yaml_content: str = yaml.dump(compose_dict, default_flow_style=False, sort_keys=False)
     header = f"# Auto-generated from topology definition for lab: {lab_name}\n"
     header += "# Supports any kathara/* image from KatharaFramework/Docker-Images\n\n"
 
@@ -363,7 +363,7 @@ def _assign_ips_for_link(link: LinkConfig, link_idx: int) -> dict[str, str]:
             ip = machine.get("ip", f"{base_ip}.{idx + 1}")
             ip_assignments[machine_name] = ip.split("/")[0]
         else:
-            ip_assignments[machine] = f"{base_ip}.{idx + 1}"
+            ip_assignments[str(machine)] = f"{base_ip}.{idx + 1}"
 
     return ip_assignments
 

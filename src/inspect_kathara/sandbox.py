@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from inspect_ai.util._sandbox.docker.docker import DockerSandboxEnvironment
 from inspect_ai.util._sandbox.environment import (
     SandboxEnvironment,
@@ -311,6 +311,9 @@ def generate_compose_for_inspect(
     if not lab_config.machines:
         raise ValueError(f"No machines found in {lab_conf_path}")
 
+    if default_machine and default_machine not in lab_config.machines:
+        raise ValueError(f"Default machine '{default_machine}' not found in lab.conf")
+
     all_domains: set[str] = set()
     for machine in lab_config.machines.values():
         all_domains.update(domain for _, domain in machine.collision_domains)
@@ -421,7 +424,7 @@ def generate_compose_for_inspect(
 
         services[machine_name] = service
 
-    yaml_content = yaml.dump(
+    yaml_content: str = yaml.dump(
         {"services": services, "networks": networks},
         default_flow_style=False,
         sort_keys=False,
